@@ -318,7 +318,7 @@ else:
 
     # Reference data cards from last RAG response
     if st.session_state.reference_cards:
-        with st.expander("📎 Reference Data Cards", expanded=False):
+        with st.expander("📎 Reference Data Cards", expanded=True):
             n_cards = len(st.session_state.reference_cards)
             card_cols = st.columns(min(n_cards, 3))
             for i, card in enumerate(st.session_state.reference_cards):
@@ -327,11 +327,20 @@ else:
                     relevance_pct = f"{card['relevance']:.0%}" if card.get("relevance") else "—"
                     st.metric(
                         label=f"#{card.get('rank', '?')}  {card.get('name', 'Unknown')}",
-                        value=score_str,
+                        value=f"Score: {score_str}",
                         delta=f"Relevance {relevance_pct}",
                         delta_color="off",
                     )
                     st.caption(card.get("country", ""))
+                    # Show extra fields present on profile cards
+                    if card.get("type") and card["type"] != "N/A":
+                        st.caption(f"Type: {card['type']}")
+                    if card.get("founded") and card["founded"] != "N/A":
+                        st.caption(f"Founded: {card['founded']}")
+                    if card.get("students") and card["students"] != "N/A":
+                        st.caption(f"Students: {card['students']}")
+                    if card.get("description"):
+                        st.caption(f"_{card['description'][:160]}…_")
 
     # Chat input — st.chat_input pins itself to the bottom of the page
     if prompt := st.chat_input("Ask about universities, rankings, countries, scores…"):
@@ -358,7 +367,8 @@ else:
                     cards = []
                     query_type = "error"
 
-            badge = "🔍 RAG" if query_type == "rag" else ("🧮 SQL" if query_type == "sql" else "⚠️")
+            badge_map = {"rag": "🔍 RAG", "sql": "🧮 SQL", "profile": "🎓 Profile"}
+            badge = badge_map.get(query_type, "⚠️")
             full_answer = f"**[{badge}]** {answer}"
             st.markdown(full_answer)
 

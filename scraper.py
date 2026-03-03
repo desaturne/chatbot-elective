@@ -14,6 +14,7 @@ import csv
 import json
 import logging
 import random
+import re
 from pathlib import Path
 
 from playwright.async_api import async_playwright, Response
@@ -47,6 +48,33 @@ DETAIL_TABS = {
     "Global Engagement": "global_engagement",
     "Sustainability": "sustainability",
 }
+
+# Selectors tried in order for each piece of content on the detail page
+_DESC_SELECTORS = [
+    "[class*='about'] p",
+    "[class*='overview'] p",
+    "[class*='intro'] p",
+    "[class*='description'] p",
+    ".uni-description p",
+    "article p",
+    "main p",
+]
+
+_FACTS_SELECTORS = [
+    "[class*='key-facts'] li",
+    "[class*='key-stat']",
+    "[class*='facts-item']",
+    "[class*='stats'] li",
+    "dl dt, dl dd",         # definition list pattern
+    "[class*='detail'] li",
+]
+
+_REVIEW_SELECTORS = [
+    "[class*='review'] p",
+    "[class*='testimonial'] p",
+    "[class*='student-review'] p",
+    "[class*='quote'] p",
+]
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -205,8 +233,31 @@ async def scrape_layer_a(browser) -> list[dict]:
 # Layer B helpers
 # ---------------------------------------------------------------------------
 
+async def _scrape_text_from_selectors(page, selectors: list[str], max_chars: int = 1200) -> str:
+    """Try each selector in order; collect and join text until max_chars reached."""
+    for sel in selectors:
+        try:
+            els = await page.query_selector_all(sel)
+            if not els:
+                continue
+            parts = []
+            for el in els[:8]:  # cap at 8 elements per selector
+                try:
+                    text = (await el.inner_text()).strip()
+                    if text and len(text) > 20:
+                        parts.append(text)
+                except Exception:
+                    continue
+            if parts:
+                combined = " ".join(parts)
+                return combined[:max_chars]
+        except Exception:
+            continue
+    return ""
+
+
 async def scrape_detail_page(context, url: str, uni_name: str) -> dict:
-    """Visit one university detail page and scrape tab scores."""
+    """Visit one university detail page and scrape tab scores, description, and key facts."""
     page = await context.new_page()
     await stealth_async(page)
 
@@ -214,15 +265,52 @@ async def scrape_detail_page(context, url: str, uni_name: str) -> dict:
         "detail_url": url,
         "university_name": uni_name,
         **{field: None for field in DETAIL_TABS.values()},
+        "description": "",
+        "university_type": "",
+        "founded_year": "",
+        "total_students": "",
+        "student_faculty_ratio": "",
+        "review_snippets": "",
     }
 
     try:
         await page.goto(url, wait_until="networkidle", timeout=60_000)
         await asyncio.sleep(random.uniform(1.5, 3.0))
 
+        # ── Description ───────────────────────────────────────────────────────
+        result["description"] = await _scrape_text_from_selectors(page, _DESC_SELECTORS)
+
+        # ── Key facts ─────────────────────────────────────────────────────────
+        # Try scraping a raw block of facts, then parse known fields from it
+        facts_block = await _scrape_text_from_selectors(page, _FACTS_SELECTORS, max_chars=800)
+        if facts_block:
+            fl = facts_block.lower()
+            # Extract university type
+            for kw in ("public", "private", "state", "national", "federal"):
+                if kw in fl:
+                    result["university_type"] = kw.capitalize()
+                    break
+            # Extract founded year (4-digit number between 1000-2024)
+            yr_match = re.search(r"\b(1[0-9]{3}|20[0-2][0-9])\b", facts_block)
+            if yr_match:
+                result["founded_year"] = yr_match.group(1)
+            # Extract total students (number followed by "students" or comma-formatted)
+            stu_match = re.search(r"([\d,]+)\s*(?:students|enrolled|undergrad|graduate)", fl)
+            if stu_match:
+                result["total_students"] = stu_match.group(1).replace(",", "")
+            # Extract student-faculty ratio  e.g. "12:1" or "12 to 1"
+            ratio_match = re.search(r"(\d+)\s*[:/]\s*(\d+)", facts_block)
+            if ratio_match:
+                result["student_faculty_ratio"] = f"{ratio_match.group(1)}:{ratio_match.group(2)}"
+
+        # ── Reviews ───────────────────────────────────────────────────────────
+        result["review_snippets"] = await _scrape_text_from_selectors(
+            page, _REVIEW_SELECTORS, max_chars=600
+        )
+
+        # ── Tab scores ────────────────────────────────────────────────────────
         for tab_label, field_name in DETAIL_TABS.items():
             try:
-                # Try to find and click the tab
                 tab_btn = page.locator(
                     f"button:has-text('{tab_label}'), "
                     f"[role='tab']:has-text('{tab_label}'), "
@@ -231,7 +319,6 @@ async def scrape_detail_page(context, url: str, uni_name: str) -> dict:
                 await tab_btn.click(timeout=8_000)
                 await asyncio.sleep(random.uniform(0.8, 1.5))
 
-                # Attempt multiple score selectors in priority order
                 score_selectors = [
                     "[class*='lens-score'] .value",
                     "[class*='tab-score']",
@@ -320,7 +407,12 @@ async def main():
 
         await context.close()
 
-        fieldnames_b = ["detail_url", "university_name"] + list(DETAIL_TABS.values())
+        fieldnames_b = (
+            ["detail_url", "university_name"]
+            + list(DETAIL_TABS.values())
+            + ["description", "university_type", "founded_year",
+               "total_students", "student_faculty_ratio", "review_snippets"]
+        )
         with open(DETAIL_CSV, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames_b, extrasaction="ignore")
             writer.writeheader()

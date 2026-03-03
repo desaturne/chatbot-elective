@@ -3,6 +3,7 @@
 
 # Data files (too large for git / regeneratable)
 data/raw/*.csv
+data/processed/*.csv
 data/processed/*.db
 data/chroma_db/
 

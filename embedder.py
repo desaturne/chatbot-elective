@@ -40,23 +40,44 @@ def build_document_text(row: dict) -> str:
         except (ValueError, TypeError):
             return str(val)
 
+    # Key facts block
+    facts_parts = []
+    if row.get("university_type"):
+        facts_parts.append(f"Type: {row['university_type']}")
+    if row.get("founded_year"):
+        facts_parts.append(f"Founded: {row['founded_year']}")
+    if row.get("total_students"):
+        facts_parts.append(f"Total students: {row['total_students']}")
+    if row.get("student_faculty_ratio"):
+        facts_parts.append(f"Student-faculty ratio: {row['student_faculty_ratio']}")
+    facts_str = (", ".join(facts_parts) + ". ") if facts_parts else ""
+
+    description = str(row.get("description") or "").strip()
+    desc_str = (f"About: {description[:600]} ") if description else ""
+
+    reviews = str(row.get("review_snippets") or "").strip()
+    review_str = (f"Student reviews: {reviews[:400]} ") if reviews else ""
+
     return (
         f"{row.get('university_name', 'Unknown')} is ranked "
         f"#{row.get('rank', 'N/A')} globally in the QS World University Rankings. "
-        f"Located in {row.get('country', 'N/A')} ({row.get('continent', 'N/A')}), "
-        f"it has an overall score of {fmt(row.get('overall_score'))}. "
+        f"Located in {row.get('country', 'N/A')} ({row.get('continent', 'N/A')}). "
+        f"{facts_str}"
+        f"{desc_str}"
+        f"Overall score: {fmt(row.get('overall_score'))}. "
         f"Key ranking metrics — "
         f"Academic Reputation: {fmt(row.get('academic_reputation'))}, "
         f"Employer Reputation: {fmt(row.get('employer_reputation'))}, "
         f"Citations per Faculty: {fmt(row.get('citations_per_faculty'))}, "
         f"International Faculty Ratio: {fmt(row.get('intl_faculty_ratio'))}, "
         f"International Student Ratio: {fmt(row.get('intl_student_ratio'))}. "
-        f"Detailed lens scores — "
+        f"Lens scores — "
         f"Research & Discovery: {fmt(row.get('research_discovery'))}, "
         f"Learning Experience: {fmt(row.get('learning_experience'))}, "
         f"Employability: {fmt(row.get('employability'))}, "
         f"Global Engagement: {fmt(row.get('global_engagement'))}, "
-        f"Sustainability: {fmt(row.get('sustainability'))}."
+        f"Sustainability: {fmt(row.get('sustainability'))}. "
+        f"{review_str}"
     )
 
 
