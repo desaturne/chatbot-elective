@@ -29,6 +29,6 @@ nbformat==5.10.4
 streamlit==1.42.0
 
 # --- Utilities ---
-numpy==1.26.4
-scikit-learn==1.5.2
+numpy>=1.26.4
+scikit-learn>=1.5.2
 tqdm==4.67.1
