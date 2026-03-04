@@ -2,8 +2,14 @@
 scraper.py
 Two-layer Playwright scraper for QS World University Rankings.
 
-Layer A: Intercepts the internal JSON API on the main rankings page.
-Layer B: Visits each university detail page and scrapes tab scores.
+Layer A  — Collects university names + detail URLs from the main rankings page.
+           Strategy 1: network interception (catches the internal JSON API call)
+           Strategy 2: DOM link scan  (fallback — finds a[href*='/universities/'])
+
+Layer B  — Visits each university detail page and scrapes:
+           • ALL main ranking scores (overall, academic rep, employer rep, …)
+           • All 5 QS lens tab scores (Research, Learning, Employability, …)
+           • Description, key facts, and student review snippets
 
 Usage:
     python scraper.py
@@ -15,60 +21,69 @@ import json
 import logging
 import random
 import re
+import urllib.request as _urllib_req
 from pathlib import Path
 
-from playwright.async_api import async_playwright, Response
-from playwright_stealth import stealth_async
+from playwright.async_api import async_playwright
+
+try:
+    from playwright_stealth import stealth_async
+except ImportError:
+    async def stealth_async(page): pass
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-BASE_URL = "https://www.topuniversities.com/world-university-rankings"
-MAIN_CSV = Path("data/raw/rankings_main.csv")
+BASE_URL   = "https://www.topuniversities.com/world-university-rankings"
+MAIN_CSV   = Path("data/raw/rankings_main.csv")
 DETAIL_CSV = Path("data/raw/rankings_detail.csv")
-LOG_FILE = Path("logs/scraper.log")
+LOG_FILE   = Path("logs/scraper.log")
 
-MAX_DETAIL_PAGES = 200  # limit Layer B to Top 200 to keep runtime reasonable
+MAX_LAYER_A   = 1504  # full QS 2026 dataset (1504 universities)
+MAX_LAYER_B   = 200   # max detail pages (each takes ~5–10 s)
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 ]
+
+# Known column-header strings that should never appear as university names
+_HEADER_LABELS = {
+    "rank", "university", "institution", "overall score", "score",
+    "country", "location", "city", "academic reputation",
+    "employer reputation", "citations", "international",
+    "h-index citations", "faculty", "students",
+}
 
 DETAIL_TABS = {
     "Research & Discovery": "research_discovery",
-    "Learning Experience": "learning_experience",
-    "Employability": "employability",
-    "Global Engagement": "global_engagement",
-    "Sustainability": "sustainability",
+    "Learning Experience":  "learning_experience",
+    "Employability":        "employability",
+    "Global Engagement":    "global_engagement",
+    "Sustainability":       "sustainability",
 }
 
-# Selectors tried in order for each piece of content on the detail page
+# Selectors for description, key facts, reviews on detail pages
 _DESC_SELECTORS = [
     "[class*='about'] p",
     "[class*='overview'] p",
     "[class*='intro'] p",
     "[class*='description'] p",
-    ".uni-description p",
     "article p",
     "main p",
 ]
-
 _FACTS_SELECTORS = [
     "[class*='key-facts'] li",
     "[class*='key-stat']",
     "[class*='facts-item']",
     "[class*='stats'] li",
-    "dl dt, dl dd",         # definition list pattern
+    "dl dt, dl dd",
     "[class*='detail'] li",
 ]
-
 _REVIEW_SELECTORS = [
     "[class*='review'] p",
     "[class*='testimonial'] p",
@@ -88,266 +103,536 @@ logging.basicConfig(
 
 
 # ---------------------------------------------------------------------------
-# Layer A helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
-def _parse_layer_a_item(item: dict) -> dict:
-    """Normalise one entry from the rankings JSON payload."""
-    # Field names vary slightly across QS API versions
-    def _get(*keys):
-        for k in keys:
-            v = item.get(k)
-            if v not in (None, "", "-"):
-                return v
-        return None
-
-    detail_path = _get("url", "guid", "link") or ""
-    if detail_path and not detail_path.startswith("http"):
-        detail_path = "https://www.topuniversities.com" + detail_path
-
+def _new_context_kwargs() -> dict:
     return {
-        "rank": _get("rank_display", "rank", "overallRank"),
-        "university_name": _get("title", "name", "institution"),
-        "country": _get("country", "countryName", "location"),
-        "overall_score": _get("overall_score", "score", "overallScore"),
-        "citations_per_faculty": _get("citations", "cf_score", "citationsPerFaculty"),
-        "academic_reputation": _get("ar_score", "academicReputation", "ar"),
-        "employer_reputation": _get("er_score", "employerReputation", "er"),
-        "intl_faculty_ratio": _get("ifr_score", "internationalFaculty", "ifr"),
-        "intl_student_ratio": _get("isr_score", "internationalStudents", "isr"),
-        "detail_url": detail_path,
+        "user_agent": random.choice(USER_AGENTS),
+        "viewport": {"width": 1440, "height": 900},
+        "locale": "en-US",
     }
 
 
-async def _intercept_rankings_json(page) -> list[dict]:
-    """
-    Register a response listener BEFORE navigating.
-    TopUniversities loads ranking data via an internal JSON endpoint;
-    this captures that payload without DOM parsing.
-    """
-    captured: list[dict] = []
-    raw_payloads: list = []
+def _is_header_label(text: str) -> bool:
+    return text.strip().lower() in _HEADER_LABELS
 
-    async def on_response(response: Response):
-        url = response.url
-        content_type = response.headers.get("content-type", "")
-        # Match likely data endpoints
-        if (
-            "qs-rankings-data" in url
-            or "rankings-data" in url
-            or (
-                "topuniversities.com" in url
-                and "json" in content_type
-                and response.status == 200
-            )
-        ):
-            try:
-                body = await response.body()
-                data = json.loads(body)
-                if isinstance(data, list) and len(data) > 0:
-                    raw_payloads.extend(data)
-                elif isinstance(data, dict):
-                    # Some endpoints wrap the list: {"data": [...]}
-                    for key in ("data", "results", "items", "universities"):
-                        if isinstance(data.get(key), list):
-                            raw_payloads.extend(data[key])
-                            break
-            except Exception as exc:
-                logging.warning("Response parse error for %s: %s", url, exc)
 
+def _normalise_url(path: str) -> str:
+    if not path:
+        return ""
+    return path if path.startswith("http") else "https://www.topuniversities.com" + path
+
+
+def _parse_api_item(item: dict) -> dict | None:
+    """Map one JSON object from the QS API to our standard field names."""
+    def _get(*keys):
+        for k in keys:
+            v = item.get(k)
+            if v not in (None, "", "-", "N/A"):
+                return v
+        return None
+
+    name = _get("title", "name", "institution", "university_name")
+    if not name or _is_header_label(str(name)):
+        return None
+
+    def _parse_score(val):
+        """Safely coerce a score value to float in range [0, 100]."""
+        if val in (None, "", "-", "N/A"):
+            return None
+        try:
+            f = float(str(val).replace(",", ""))
+            return f if 0 <= f <= 100 else None
+        except (ValueError, TypeError):
+            return None
+
+    # The QS 2026 API returns per-indicator scores inside a nested dict:
+    # {"Research & Discovery": [{"indicator_name": "...", "score": "..."}], ...}
+    nested = item.get("scores", {})
+
+    def _indicator_score(category: str, indicator: str):
+        for entry in nested.get(category, []):
+            if entry.get("indicator_name") == indicator:
+                return _parse_score(entry.get("score"))
+        return None
+
+    return {
+        "rank":            _get("rank_display", "rank", "overall_rank", "overallRank"),
+        "university_name": name,
+        "country":         _get("country", "country_name", "countryName", "location"),
+        "overall_score":   _parse_score(_get("overall_score", "score", "overallScore", "scores_overall")),
+        "citations_per_faculty": (
+            _indicator_score("Research & Discovery", "Citations per Faculty")
+            or _parse_score(_get("citations", "cf_score", "scores_citations", "citationsPerFaculty"))
+        ),
+        "academic_reputation": (
+            _indicator_score("Research & Discovery", "Academic Reputation")
+            or _parse_score(_get("ar_score", "scores_ar", "academicReputation"))
+        ),
+        "employer_reputation": (
+            _indicator_score("Employability", "Employer Reputation")
+            or _parse_score(_get("er_score", "scores_er", "employerReputation"))
+        ),
+        "intl_faculty_ratio": (
+            _indicator_score("Global Engagement", "International Faculty Ratio")
+            or _parse_score(_get("ifr_score", "scores_ifr", "internationalFaculty"))
+        ),
+        "intl_student_ratio": (
+            _indicator_score("Global Engagement", "International Student Ratio")
+            or _parse_score(_get("isr_score", "scores_isr", "internationalStudents"))
+        ),
+        # "path" is the new primary URL field in the QS 2026 API
+        "detail_url": _normalise_url(
+            _get("path", "url", "guid", "link", "profile_url") or ""
+        ),
+    }
+
+
+async def _scroll_to_bottom(page, rounds: int = 20, pause: float = 1.2):
+    """Scroll the page to the bottom to trigger infinite-scroll / lazy loading."""
+    for _ in range(rounds):
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(pause)
+
+
+# ---------------------------------------------------------------------------
+# Layer A — Strategy 1: network response interception
+# ---------------------------------------------------------------------------
+
+async def _try_intercept(browser) -> list[dict]:
+    """
+    Broad JSON interception: try to parse ANY non-trivial response from
+    topuniversities.com as JSON. Does NOT filter by content-type because
+    QS sometimes serves data as text/plain or text/html.
+    """
+    captured: list = []
+
+    async def on_response(response):
+        if "topuniversities" not in response.url:
+            return
+        if response.status != 200:
+            return
+        try:
+            body = await response.body()
+            if len(body) < 500:           # too small to be a rankings payload
+                return
+            text = body.decode("utf-8", errors="ignore").strip()
+            if text[0] not in ("[", "{"):  # must look like JSON
+                return
+            data = json.loads(text)
+
+            rows = []
+            if isinstance(data, list) and len(data) > 5:
+                rows = data
+            elif isinstance(data, dict):
+                for key in ("data", "results", "items", "universities",
+                            "rankings", "rows", "hits", "score_nodes"):
+                    val = data.get(key)
+                    if isinstance(val, list) and len(val) > 5:
+                        rows = val
+                        break
+
+            if rows:
+                # Quick sanity check: does at least one item look like a university?
+                sample = rows[0] if rows else {}
+                university_keys = {"title", "name", "institution", "university_name",
+                                   "rank", "rank_display", "score", "overallScore",
+                                   "score_nid", "core_id"}  # QS 2026 API fields
+                if any(k in sample for k in university_keys):
+                    captured.extend(rows)
+                    print(f"  [✓] Intercepted {len(rows)} rows from {response.url[:80]}")
+        except Exception:
+            pass
+
+    context = await browser.new_context(**_new_context_kwargs())
+    page    = await context.new_page()
+    await stealth_async(page)
     page.on("response", on_response)
-    return raw_payloads
+
+    print(f"  [>] Navigating to {BASE_URL} (interception mode)...")
+    try:
+        await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
+    except Exception as e:
+        logging.warning("Layer A navigation (interception): %s", e)
+
+    await _scroll_to_bottom(page, rounds=20, pause=1.0)
+    await asyncio.sleep(5)   # give in-flight XHR calls time to land
+    await context.close()
+
+    return captured
+
+
+# ---------------------------------------------------------------------------
+# Layer A — Strategy 0: direct paginated REST API  (most reliable)
+# ---------------------------------------------------------------------------
+
+async def _get_json_async(url: str) -> dict:
+    """Fetch a JSON URL in a thread so we don't block the asyncio loop."""
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json, text/plain, */*",
+        "Referer": BASE_URL,
+    }
+    loop = asyncio.get_event_loop()
+    def _sync_fetch():
+        req = _urllib_req.Request(url, headers=headers)
+        with _urllib_req.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+    return await loop.run_in_executor(None, _sync_fetch)
+
+
+async def _fetch_all_api_pages(browser, max_items: int = MAX_LAYER_A) -> list[dict]:
+    """
+    Directly query QS's internal paginated rankings REST API.
+    The NID (Drupal node ID) is extracted from drupalSettings on the page,
+    so this stays correct even when QS publishes new yearly rankings.
+    """
+    # Step 1: visit rankings page to discover the current NID
+    nid = ""
+    context = await browser.new_context(**_new_context_kwargs())
+    page    = await context.new_page()
+    await stealth_async(page)
+    try:
+        await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60_000)
+        nid = await page.evaluate(
+            "() => (window.drupalSettings && drupalSettings.qs_rankings_rest_api"
+            "       ? String(drupalSettings.qs_rankings_rest_api.nid) : '')"
+        )
+    except Exception as e:
+        logging.warning("NID extraction failed: %s", e)
+    finally:
+        await context.close()
+
+    if not nid:
+        print("  [!] Could not determine rankings nid from drupalSettings")
+        return []
+
+    print(f"  [>] Direct API fetch  nid={nid}  max={max_items}")
+
+    items_per_page = 100
+    all_nodes: list[dict] = []
+    page_num  = 0
+
+    while len(all_nodes) < max_items:
+        api_url = (
+            f"https://www.topuniversities.com/rankings/endpoint"
+            f"?nid={nid}&page={page_num}&items_per_page={items_per_page}"
+            f"&tab=indicators&region=&countries=&cities=&search="
+            f"&star=&sort_by=&order_by=&program_type="
+        )
+        try:
+            data = await _get_json_async(api_url)
+        except Exception as e:
+            logging.warning("API page %d error: %s", page_num, e)
+            break
+
+        nodes = data.get("score_nodes", [])
+        if not nodes:
+            break
+
+        all_nodes.extend(nodes)
+        total_pages  = int(data.get("total_pages",  1))
+        total_record = int(data.get("total_record", 0))
+        effective_max = min(total_record, max_items)
+        print(
+            f"  [+] Page {page_num+1}/{total_pages}  "
+            f"collected {len(all_nodes)}/{effective_max}"
+        )
+
+        if page_num + 1 >= total_pages or len(all_nodes) >= max_items:
+            break
+        page_num += 1
+        await asyncio.sleep(random.uniform(0.3, 0.8))   # be polite
+
+    print(f"  [+] Direct API fetch complete — {len(all_nodes)} raw items")
+    return all_nodes[:max_items]
+
+
+# ---------------------------------------------------------------------------
+# Layer A — Strategy 2: DOM link scan
+# ---------------------------------------------------------------------------
+
+async def _try_dom_links(browser) -> list[dict]:
+    """
+    Fallback when interception yields nothing.
+    Finds every  <a href="/universities/...">  link on the loaded page.
+    Deduplicates by URL and assigns sequential rank based on DOM order.
+    """
+    context = await browser.new_context(**_new_context_kwargs())
+    page    = await context.new_page()
+    await stealth_async(page)
+
+    print(f"  [>] Navigating to {BASE_URL} (DOM link fallback)...")
+    try:
+        await page.goto(BASE_URL, wait_until="networkidle", timeout=90_000)
+    except Exception as e:
+        logging.warning("Layer A navigation (DOM): %s", e)
+
+    await _scroll_to_bottom(page, rounds=25, pause=1.5)
+    await asyncio.sleep(4)
+
+    # Collect all university-page links
+    links = await page.query_selector_all("a[href*='/universities/']")
+    print(f"  [i] Found {len(links)} a[href*='/universities/'] links on page")
+
+    seen_urls: set = set()
+    rows: list[dict] = []
+
+    for link_el in links:
+        try:
+            name = (await link_el.inner_text()).strip()
+            href = (await link_el.get_attribute("href") or "").strip()
+
+            # Skip blank, too-short, or header-label entries
+            if not name or len(name) < 3 or _is_header_label(name):
+                continue
+            # Skip navigation links (e.g. site nav "Universities" menu items)
+            if not re.search(r"/universities/[a-z]", href):
+                continue
+
+            full_url = _normalise_url(href)
+            if full_url in seen_urls:
+                continue
+            seen_urls.add(full_url)
+
+            # Try to grab rank from the closest ancestor that contains a digit
+            rank_val = None
+            el = link_el
+            for _ in range(6):
+                parent = await el.evaluate_handle("el => el.parentElement")
+                if not parent:
+                    break
+                parent_text = (await parent.evaluate("el => el.innerText")).strip()
+                rank_match  = re.match(r"^[=\s]*(\d{1,4})\b", parent_text)
+                if rank_match:
+                    rank_val = int(rank_match.group(1))
+                    break
+                el = parent
+
+            rows.append({
+                "rank":            rank_val if rank_val else len(rows) + 1,
+                "university_name": name,
+                "country":         None,
+                "overall_score":   None,
+                "citations_per_faculty": None,
+                "academic_reputation":   None,
+                "employer_reputation":   None,
+                "intl_faculty_ratio":    None,
+                "intl_student_ratio":    None,
+                "detail_url": full_url,
+            })
+        except Exception:
+            continue
+
+    await context.close()
+    print(f"  [+] DOM fallback found {len(rows)} unique universities")
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Layer A — public entry point
+# ---------------------------------------------------------------------------
+
+def _dedup_rows(rows: list[dict]) -> list[dict]:
+    """De-duplicate parsed rows by detail_url then by university_name."""
+    seen: set = set()
+    unique: list[dict] = []
+    for r in rows:
+        key = r["detail_url"] or r["university_name"]
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    return unique
 
 
 async def scrape_layer_a(browser) -> list[dict]:
-    """Navigate to the rankings page and collect the main list via network interception."""
-    context = await browser.new_context(
-        user_agent=random.choice(USER_AGENTS),
-        viewport={"width": 1440, "height": 900},
-        locale="en-US",
-    )
-    page = await context.new_page()
-    await stealth_async(page)
+    # ── Strategy 0: direct paginated REST API (preferred) ────────────────────
+    print("  [>] Strategy 0: direct REST API...")
+    raw = await _fetch_all_api_pages(browser, max_items=MAX_LAYER_A)
+    if raw:
+        rows = [r for r in (_parse_api_item(i) for i in raw) if r]
+        unique = _dedup_rows(rows)
+        print(f"  [+] Strategy 0 yielded {len(unique)} universities")
+        return unique[:MAX_LAYER_A]
 
-    raw_payloads = await _intercept_rankings_json(page)
+    # ── Strategy 1: network interception ─────────────────────────────────────
+    print("  [>] Strategy 1: network interception fallback...")
+    api_items = await _try_intercept(browser)
+    if api_items:
+        rows = [r for r in (_parse_api_item(i) for i in api_items) if r]
+        unique = _dedup_rows(rows)
+        print(f"  [+] Strategy 1 yielded {len(unique)} universities")
+        return unique[:MAX_LAYER_A]
 
-    print(f"  [>] Navigating to {BASE_URL} ...")
-    await page.goto(BASE_URL, wait_until="networkidle", timeout=90_000)
-
-    # Scroll to trigger lazy-loading / pagination
-    for _ in range(15):
-        await page.keyboard.press("End")
-        await asyncio.sleep(random.uniform(0.8, 1.8))
-
-    # Wait a moment for remaining XHR responses to arrive
-    await asyncio.sleep(3)
-    await context.close()
-
-    if not raw_payloads:
-        # Fallback: try DOM scraping if network interception got nothing
-        logging.warning("Network interception returned 0 items; attempting DOM fallback")
-        print("  [!] Network interception empty - trying DOM fallback...")
-        context2 = await browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            viewport={"width": 1440, "height": 900},
-        )
-        page2 = await context2.new_page()
-        await stealth_async(page2)
-        await page2.goto(BASE_URL, wait_until="networkidle", timeout=90_000)
-        await asyncio.sleep(5)
-        # Try common row selectors used by QS
-        selectors = [
-            "tr[class*='ranking']",
-            "[class*='uni-link']",
-            "[data-nid]",
-            "table tbody tr",
-        ]
-        for sel in selectors:
-            rows = await page2.query_selector_all(sel)
-            if rows:
-                for row in rows[:500]:
-                    try:
-                        name_el = await row.query_selector("a, [class*='name'], td:nth-child(2)")
-                        country_el = await row.query_selector("[class*='country'], td:nth-child(3)")
-                        score_el = await row.query_selector("[class*='score'], td:last-child")
-                        link_el = await row.query_selector("a[href*='/universities/']")
-                        raw_payloads.append({
-                            "title": await name_el.inner_text() if name_el else "",
-                            "country": await country_el.inner_text() if country_el else "",
-                            "score": await score_el.inner_text() if score_el else "",
-                            "url": await link_el.get_attribute("href") if link_el else "",
-                        })
-                    except Exception:
-                        continue
-                if raw_payloads:
-                    break
-        await context2.close()
-
-    rows = [_parse_layer_a_item(item) for item in raw_payloads]
-    rows = [r for r in rows if r.get("university_name")]  # drop empty
-    print(f"  [+] Layer A: captured {len(rows)} universities")
-    return rows
+    # ── Strategy 2: DOM link scan ─────────────────────────────────────────────
+    print("  [>] Strategy 2: DOM link scan fallback...")
+    rows = await _try_dom_links(browser)
+    return rows[:MAX_LAYER_A]
 
 
 # ---------------------------------------------------------------------------
 # Layer B helpers
 # ---------------------------------------------------------------------------
 
-async def _scrape_text_from_selectors(page, selectors: list[str], max_chars: int = 1200) -> str:
-    """Try each selector in order; collect and join text until max_chars reached."""
+async def _scrape_text(page, selectors: list[str], max_chars: int = 1200) -> str:
     for sel in selectors:
         try:
             els = await page.query_selector_all(sel)
             if not els:
                 continue
-            parts = []
-            for el in els[:8]:  # cap at 8 elements per selector
-                try:
-                    text = (await el.inner_text()).strip()
-                    if text and len(text) > 20:
-                        parts.append(text)
-                except Exception:
-                    continue
+            parts = [
+                t for el in els[:8]
+                if (t := (await el.inner_text()).strip()) and len(t) > 20
+            ]
             if parts:
-                combined = " ".join(parts)
-                return combined[:max_chars]
+                return " ".join(parts)[:max_chars]
         except Exception:
             continue
     return ""
 
 
+async def _scrape_score(page, selectors: list[str]) -> float | None:
+    for sel in selectors:
+        try:
+            el = page.locator(sel).first
+            text = await el.inner_text(timeout=4_000)
+            cleaned = re.sub(r"[^\d.]", "", text.strip())
+            if cleaned:
+                val = float(cleaned)
+                if 0 <= val <= 100:
+                    return val
+        except Exception:
+            continue
+    return None
+
+
+# Score selectors for the main metrics visible on the detail page itself
+# (used so Layer B can fill gaps when Layer A has no scores)
+_MAIN_SCORES: dict[str, list[str]] = {
+    "overall_score": [
+        "[class*='overall'] [class*='score'] span",
+        "[class*='overall-score']",
+        "[class*='score-overall']",
+        "[data-score='overall']",
+        "[class*='rank-score']",
+    ],
+    "academic_reputation": [
+        "[class*='academic'] [class*='score']",
+        "[data-indicator='ar']",
+        "[class*='ar-score']",
+    ],
+    "employer_reputation": [
+        "[class*='employer'] [class*='score']",
+        "[data-indicator='er']",
+        "[class*='er-score']",
+    ],
+    "citations_per_faculty": [
+        "[class*='citations'] [class*='score']",
+        "[data-indicator='cf']",
+    ],
+    "intl_faculty_ratio": [
+        "[class*='intl-faculty'] [class*='score']",
+        "[data-indicator='ifr']",
+    ],
+    "intl_student_ratio": [
+        "[class*='intl-student'] [class*='score']",
+        "[data-indicator='isr']",
+    ],
+}
+
+
 async def scrape_detail_page(context, url: str, uni_name: str) -> dict:
-    """Visit one university detail page and scrape tab scores, description, and key facts."""
+    """
+    Scrape one university detail page.
+    Returns all scores, description, key facts and review snippets.
+    """
     page = await context.new_page()
     await stealth_async(page)
 
-    result = {
-        "detail_url": url,
+    result: dict = {
+        "detail_url":    url,
         "university_name": uni_name,
+        # main metric scores (may already be set from Layer A; filled here if not)
+        "overall_score":   None,
+        "academic_reputation": None,
+        "employer_reputation": None,
+        "citations_per_faculty": None,
+        "intl_faculty_ratio": None,
+        "intl_student_ratio": None,
+        # lens tab scores
         **{field: None for field in DETAIL_TABS.values()},
-        "description": "",
-        "university_type": "",
-        "founded_year": "",
-        "total_students": "",
+        # qualitative fields
+        "description":          "",
+        "university_type":      "",
+        "founded_year":         "",
+        "total_students":       "",
         "student_faculty_ratio": "",
-        "review_snippets": "",
+        "review_snippets":      "",
     }
 
     try:
-        await page.goto(url, wait_until="networkidle", timeout=60_000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
         await asyncio.sleep(random.uniform(1.5, 3.0))
 
-        # ── Description ───────────────────────────────────────────────────────
-        result["description"] = await _scrape_text_from_selectors(page, _DESC_SELECTORS)
+        # ── Main metric scores ────────────────────────────────────────────────
+        for field, selectors in _MAIN_SCORES.items():
+            val = await _scrape_score(page, selectors)
+            if val is not None:
+                result[field] = val
 
-        # ── Key facts ─────────────────────────────────────────────────────────
-        # Try scraping a raw block of facts, then parse known fields from it
-        facts_block = await _scrape_text_from_selectors(page, _FACTS_SELECTORS, max_chars=800)
-        if facts_block:
-            fl = facts_block.lower()
-            # Extract university type
-            for kw in ("public", "private", "state", "national", "federal"):
-                if kw in fl:
-                    result["university_type"] = kw.capitalize()
-                    break
-            # Extract founded year (4-digit number between 1000-2024)
-            yr_match = re.search(r"\b(1[0-9]{3}|20[0-2][0-9])\b", facts_block)
-            if yr_match:
-                result["founded_year"] = yr_match.group(1)
-            # Extract total students (number followed by "students" or comma-formatted)
-            stu_match = re.search(r"([\d,]+)\s*(?:students|enrolled|undergrad|graduate)", fl)
-            if stu_match:
-                result["total_students"] = stu_match.group(1).replace(",", "")
-            # Extract student-faculty ratio  e.g. "12:1" or "12 to 1"
-            ratio_match = re.search(r"(\d+)\s*[:/]\s*(\d+)", facts_block)
-            if ratio_match:
-                result["student_faculty_ratio"] = f"{ratio_match.group(1)}:{ratio_match.group(2)}"
-
-        # ── Reviews ───────────────────────────────────────────────────────────
-        result["review_snippets"] = await _scrape_text_from_selectors(
-            page, _REVIEW_SELECTORS, max_chars=600
-        )
-
-        # ── Tab scores ────────────────────────────────────────────────────────
+        # ── Lens tab scores ───────────────────────────────────────────────────
         for tab_label, field_name in DETAIL_TABS.items():
             try:
-                tab_btn = page.locator(
+                btn = page.locator(
                     f"button:has-text('{tab_label}'), "
                     f"[role='tab']:has-text('{tab_label}'), "
                     f"a:has-text('{tab_label}')"
                 ).first
-                await tab_btn.click(timeout=8_000)
+                await btn.click(timeout=8_000)
                 await asyncio.sleep(random.uniform(0.8, 1.5))
 
-                score_selectors = [
+                score_sels = [
                     "[class*='lens-score'] .value",
                     "[class*='tab-score']",
                     "[class*='overall-score'] span",
                     "[data-score]",
                     "[class*='score'] .number",
+                    "[class*='score-value']",
                 ]
-                score_text = None
-                for sel in score_selectors:
-                    try:
-                        el = page.locator(sel).first
-                        score_text = await el.inner_text(timeout=4_000)
-                        if score_text and score_text.strip().replace(".", "").isdigit():
-                            break
-                    except Exception:
-                        continue
+                val = await _scrape_score(page, score_sels)
+                if val is not None:
+                    result[field_name] = val
 
-                if score_text:
-                    cleaned = score_text.strip().replace(",", "")
-                    try:
-                        result[field_name] = float(cleaned)
-                    except ValueError:
-                        pass
+            except Exception as e:
+                logging.warning("Tab '%s' failed for %s: %s", tab_label, uni_name, e)
 
-            except Exception as tab_exc:
-                logging.warning("Tab '%s' failed for %s: %s", tab_label, uni_name, tab_exc)
+        # ── Description ───────────────────────────────────────────────────────
+        result["description"] = await _scrape_text(page, _DESC_SELECTORS)
 
-    except Exception as page_exc:
-        logging.error("Detail page failed for %s (%s): %s", uni_name, url, page_exc)
+        # ── Key facts ─────────────────────────────────────────────────────────
+        facts_raw = await _scrape_text(page, _FACTS_SELECTORS, max_chars=800)
+        if facts_raw:
+            fl = facts_raw.lower()
+            for kw in ("public", "private", "state", "national", "federal"):
+                if kw in fl:
+                    result["university_type"] = kw.capitalize()
+                    break
+            yr = re.search(r"\b(1[0-9]{3}|20[0-2][0-9])\b", facts_raw)
+            if yr:
+                result["founded_year"] = yr.group(1)
+            stu = re.search(r"([\d,]+)\s*(?:students|enrolled|undergrad|graduate)", fl)
+            if stu:
+                result["total_students"] = stu.group(1).replace(",", "")
+            ratio = re.search(r"(\d+)\s*[:/]\s*(\d+)", facts_raw)
+            if ratio:
+                result["student_faculty_ratio"] = f"{ratio.group(1)}:{ratio.group(2)}"
+
+        # ── Reviews ───────────────────────────────────────────────────────────
+        result["review_snippets"] = await _scrape_text(page, _REVIEW_SELECTORS, max_chars=600)
+
+    except Exception as e:
+        logging.error("Detail page failed for %s (%s): %s", uni_name, url, e)
     finally:
         await page.close()
 
@@ -355,24 +640,28 @@ async def scrape_detail_page(context, url: str, uni_name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Main
 # ---------------------------------------------------------------------------
 
 async def main():
-    print("[*] Starting QS Rankings Scraper")
+    print("[*] QS Rankings Scraper starting\n")
+    MAIN_CSV.parent.mkdir(parents=True, exist_ok=True)
 
-    for directory in (MAIN_CSV.parent, DETAIL_CSV.parent):
-        directory.mkdir(parents=True, exist_ok=True)
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
 
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-
-        # ── Layer A ──────────────────────────────────────────────────────────
-        print("\n[*] Layer A: Scraping main rankings list...")
+        # ── Layer A ───────────────────────────────────────────────────────────
+        print("=" * 60)
+        print("[LAYER A] Collecting university list...")
+        print("=" * 60)
         rows_a = await scrape_layer_a(browser)
 
         if not rows_a:
-            print("[!] Layer A returned 0 rows. Check logs/scraper.log for details.")
+            print("\n[!] Layer A returned 0 rows.")
+            print("    Possible causes:")
+            print("    • The site blocked the scraper (try again later)")
+            print("    • The site URL changed (check BASE_URL in scraper.py)")
+            print("    Check logs/scraper.log for details.")
             await browser.close()
             return
 
@@ -385,30 +674,36 @@ async def main():
             writer = csv.DictWriter(f, fieldnames=fieldnames_a, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows_a)
-        print(f"[+] Layer A complete → {MAIN_CSV} ({len(rows_a)} rows)")
+        print(f"\n[+] Layer A -> {MAIN_CSV}  ({len(rows_a)} universities)")
 
-        # ── Layer B ──────────────────────────────────────────────────────────
-        print(f"\n[*] Layer B: Scraping detail pages (up to {MAX_DETAIL_PAGES})...")
+        # ── Layer B ───────────────────────────────────────────────────────────
+        targets = [r for r in rows_a if r.get("detail_url")][:MAX_LAYER_B]
+        print(f"\n{'=' * 60}")
+        print(f"[LAYER B] Scraping {len(targets)} detail pages...")
+        print("=" * 60)
 
-        context = await browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            viewport={"width": 1440, "height": 900},
-            locale="en-US",
-        )
-
-        detail_rows = []
-        targets = [r for r in rows_a if r.get("detail_url")][:MAX_DETAIL_PAGES]
+        context = await browser.new_context(**_new_context_kwargs())
+        detail_rows: list[dict] = []
 
         for i, row in enumerate(targets, 1):
-            print(f"  [{i}/{len(targets)}] {row['university_name']}")
-            detail = await scrape_detail_page(context, row["detail_url"], row["university_name"])
-            detail_rows.append(detail)
-            await asyncio.sleep(random.uniform(2.0, 5.0))
+            name = row["university_name"]
+            url  = row["detail_url"]
+            print(f"  [{i:>3}/{len(targets)}] {name[:60]}")
+            d = await scrape_detail_page(context, url, name)
+            # Back-fill any main scores that Layer A already has
+            for fld in ("overall_score", "academic_reputation", "employer_reputation",
+                        "citations_per_faculty", "intl_faculty_ratio", "intl_student_ratio"):
+                if d[fld] is None and row.get(fld) is not None:
+                    d[fld] = row[fld]
+            detail_rows.append(d)
+            await asyncio.sleep(random.uniform(2.0, 4.5))
 
         await context.close()
 
         fieldnames_b = (
-            ["detail_url", "university_name"]
+            ["detail_url", "university_name",
+             "overall_score", "academic_reputation", "employer_reputation",
+             "citations_per_faculty", "intl_faculty_ratio", "intl_student_ratio"]
             + list(DETAIL_TABS.values())
             + ["description", "university_type", "founded_year",
                "total_students", "student_faculty_ratio", "review_snippets"]
@@ -417,10 +712,10 @@ async def main():
             writer = csv.DictWriter(f, fieldnames=fieldnames_b, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(detail_rows)
-        print(f"[+] Layer B complete → {DETAIL_CSV} ({len(detail_rows)} rows)")
-
+        print(f"\n[+] Layer B -> {DETAIL_CSV}  ({len(detail_rows)} universities)")
         await browser.close()
-    print("\n[+] Scraping finished. Check logs/scraper.log for any warnings/errors.")
+
+    print("\n[+] Done. Check logs/scraper.log for any warnings.")
 
 
 if __name__ == "__main__":

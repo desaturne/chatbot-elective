@@ -124,7 +124,9 @@ def country_to_continent(country_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS universities (
+DROP TABLE IF EXISTS university_details;
+DROP TABLE IF EXISTS universities;
+CREATE TABLE universities (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     rank                  INTEGER,
     university_name       TEXT NOT NULL,
@@ -140,7 +142,7 @@ CREATE TABLE IF NOT EXISTS universities (
     scraped_at            TEXT
 );
 
-CREATE TABLE IF NOT EXISTS university_details (
+CREATE TABLE university_details (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     university_id         INTEGER NOT NULL,
     research_discovery    REAL,
@@ -299,9 +301,15 @@ def run_pipeline():
         print(f"  [+] {CLEAN_DETAIL_CSV}  ({len(df_detail)} rows)")
 
         # Build merged / joined CSV — this is the single source of truth
+        # Drop columns from detail that already exist in main to avoid _x/_y suffixes
+        _detail_only_cols = [
+            "university_name", "cleaned_at",
+            "overall_score", "academic_reputation", "employer_reputation",
+            "citations_per_faculty", "intl_faculty_ratio", "intl_student_ratio",
+        ]
         df_merged = pd.merge(
             df_main,
-            df_detail.drop(columns=["university_name", "cleaned_at"], errors="ignore"),
+            df_detail.drop(columns=_detail_only_cols, errors="ignore"),
             on="detail_url",
             how="left",
         )
@@ -333,7 +341,7 @@ def run_pipeline():
         if col not in df_main_db.columns:
             df_main_db[col] = None
     df_main_db[main_db_cols].rename(columns={"cleaned_at": "scraped_at"}).to_sql(
-        "universities", conn, if_exists="replace", index=False, method="multi"
+        "universities", conn, if_exists="append", index=False, method="multi"
     )
     print(f"  [+] universities table: {len(df_main)} rows")
 
@@ -357,7 +365,7 @@ def run_pipeline():
             if col not in df_detail_db.columns:
                 df_detail_db[col] = None
         df_detail_db[detail_db_cols].rename(columns={"cleaned_at": "scraped_at"}).to_sql(
-            "university_details", conn, if_exists="replace", index=False, method="multi"
+            "university_details", conn, if_exists="append", index=False, method="multi"
         )
         print(f"  [+] university_details table: {len(df_detail)} rows")
 
