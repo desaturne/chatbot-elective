@@ -34,15 +34,18 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 # LLM client factory
 # ---------------------------------------------------------------------------
 
+
 def _get_llm_client():
     """Returns (client, model_name). Supports both OpenAI and Groq."""
     provider = os.getenv("LLM_PROVIDER", "groq").lower()
     if provider == "openai":
         from openai import OpenAI
+
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     else:  # groq — uses OpenAI-compatible API
         from openai import OpenAI
+
         client = OpenAI(
             api_key=os.getenv("GROQ_API_KEY"),
             base_url="https://api.groq.com/openai/v1",
@@ -51,7 +54,9 @@ def _get_llm_client():
     return client, model
 
 
-def _llm_complete(client, model: str, prompt: str, temperature: float = 0.3, max_tokens: int = 600) -> str:
+def _llm_complete(
+    client, model: str, prompt: str, temperature: float = 0.3, max_tokens: int = 600
+) -> str:
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
@@ -65,12 +70,97 @@ def _llm_complete(client, model: str, prompt: str, temperature: float = 0.3, max
 # Query router
 # ---------------------------------------------------------------------------
 
+# Greetings and casual phrases - handle directly without LLM
+GREETING_PATTERNS = [
+    r"^hi\b", r"^hello\b", r"^hey\b", r"^hola\b", r"^greetings\b",
+    r"^good\s*(morning|afternoon|evening)\b",
+    r"^howdy\b", r"^what'?s?\s*up\b", r"^yo\b",
+    r"^help\b", r"^what\s+can\s+you\s+do\b", r"^who\s+are\s+you\b",
+    r"^thanks?\b", r"^thank\s*you\b", r"^thx\b",
+]
+
+GREETING_RESPONSES = {
+    "greeting": """Hello! I'm your QS World University Rankings assistant. I can help you with:
+
+- **University profiles**: "Tell me about MIT" or "Harvard university overview"
+- **Rankings & comparisons**: "Top 10 universities in Europe" or "Which UK university has the highest sustainability score?"
+- **Statistics**: "Average score of top 50 universities" or "How many US universities are in top 100?"
+- **Country/region info**: "Best universities in Asia" or "Universities in Canada ranked below 50"
+
+Just ask me anything about universities, rankings, scores, or countries!""",
+    "thanks": "You're welcome! Feel free to ask more questions about universities.",
+    "help": """I'm here to help you explore QS World University Rankings! You can ask me:
+
+**University Profiles:**
+- "Tell me about Stanford University"
+- "Overview of University of Oxford"
+
+**Rankings & Lists:**
+- "Top 10 universities in the world"
+- "Best universities in Germany"
+- "Universities ranked between 50 and 100"
+
+**Scores & Metrics:**
+- "Which university has the highest sustainability score?"
+- "Compare academic reputation of MIT and Stanford"
+- "Average overall score of UK universities"
+
+**Statistics:**
+- "How many universities are from Asia?"
+- "Country with most universities in top 50"
+
+What would you like to know?""",
+}
+
+
+def _is_greeting(query: str) -> str | None:
+    """
+    Detect if query is a greeting or help request.
+    Returns response type ('greeting', 'thanks', 'help') or None.
+    """
+    q = query.lower().strip()
+
+    # Check for thanks
+    if re.match(r"^(thanks?|thank\s*you|thx)\b", q):
+        return "thanks"
+
+    # Check for help
+    if re.match(r"^(help|what\s+can\s+you\s+do|who\s+are\s+you)\b", q):
+        return "help"
+
+    # Check for greetings
+    for pattern in GREETING_PATTERNS:
+        if re.match(pattern, q):
+            return "greeting"
+
+    return None
+
+
 MATH_KEYWORDS = [
-    "average", "highest", "lowest", "count", "how many", "top ", "bottom ",
-    "compare", "rank between", "greater than", "less than", "sum", "total",
-    "minimum", "maximum", "which country has the most",
-    "how does", "median", "percentile",
-    "rank ", "ranked ", "ranking ", "which is the", "who is ranked",
+    "average",
+    "highest",
+    "lowest",
+    "count",
+    "how many",
+    "top ",
+    "bottom ",
+    "compare",
+    "rank between",
+    "greater than",
+    "less than",
+    "sum",
+    "total",
+    "minimum",
+    "maximum",
+    "which country has the most",
+    "how does",
+    "median",
+    "percentile",
+    "rank ",
+    "ranked ",
+    "ranking ",
+    "which is the",
+    "who is ranked",
 ]
 
 # Matches: "8th ranked", "ranked 8th", "rank 8", "ranked #8", "#8 ranked", "8th"
@@ -148,6 +238,7 @@ Notes:
 # Text-to-SQL path
 # ---------------------------------------------------------------------------
 
+
 def _run_text_to_sql(query: str, client, model: str) -> str:
     sql_prompt = f"""You are a SQLite expert. Based on the schema below, write a valid SQLite SELECT query to answer the user's question. Return ONLY the SQL query with no explanation, no markdown fences, no comments.
 
@@ -190,12 +281,15 @@ The following data was retrieved from the database:
 
 Please answer the user's question in clear, natural language. Cite specific numbers and university names from the data. Keep the answer concise."""
 
-    return _llm_complete(client, model, summarize_prompt, temperature=0.3, max_tokens=500)
+    return _llm_complete(
+        client, model, summarize_prompt, temperature=0.3, max_tokens=500
+    )
 
 
 # ---------------------------------------------------------------------------
 # Profile lookup path
 # ---------------------------------------------------------------------------
+
 
 def _fetch_university_row(name_hint: str) -> dict | None:
     """
@@ -220,14 +314,19 @@ def _fetch_university_row(name_hint: str) -> dict | None:
     return None
 
 
-def _format_profile(row: dict, client, model: str, original_query: str) -> tuple[str, list[dict]]:
+def _format_profile(
+    row: dict, client, model: str, original_query: str
+) -> tuple[str, list[dict]]:
     """
     Build a structured university profile string and ask the LLM to narrate it.
     Returns (answer, reference_cards).
     """
+
     def _v(key, default="N/A"):
         v = row.get(key)
-        return str(v) if v is not None and str(v).strip() not in ("", "None") else default
+        return (
+            str(v) if v is not None and str(v).strip() not in ("", "None") else default
+        )
 
     def _score(key):
         v = row.get(key)
@@ -238,37 +337,37 @@ def _format_profile(row: dict, client, model: str, original_query: str) -> tuple
 
     # Structured data block passed to the LLM
     profile_block = f"""
-University Profile: {_v('university_name')}
+University Profile: {_v("university_name")}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Global Rank       : #{_v('rank')}
-Country           : {_v('country')} ({_v('continent')})
-Type              : {_v('university_type')}
-Founded           : {_v('founded_year')}
-Total Students    : {_v('total_students')}
-Student:Faculty   : {_v('student_faculty_ratio')}
+Global Rank       : #{_v("rank")}
+Country           : {_v("country")} ({_v("continent")})
+Type              : {_v("university_type")}
+Founded           : {_v("founded_year")}
+Total Students    : {_v("total_students")}
+Student:Faculty   : {_v("student_faculty_ratio")}
 
 ─── QS Overall Score ───────────────────
-Overall Score     : {_score('overall_score')} / 100
+Overall Score     : {_score("overall_score")} / 100
 
 ─── Core QS Metrics ────────────────────
-Academic Reputation    : {_score('academic_reputation')}
-Employer Reputation    : {_score('employer_reputation')}
-Citations per Faculty  : {_score('citations_per_faculty')}
-Intl. Faculty Ratio    : {_score('intl_faculty_ratio')}
-Intl. Student Ratio    : {_score('intl_student_ratio')}
+Academic Reputation    : {_score("academic_reputation")}
+Employer Reputation    : {_score("employer_reputation")}
+Citations per Faculty  : {_score("citations_per_faculty")}
+Intl. Faculty Ratio    : {_score("intl_faculty_ratio")}
+Intl. Student Ratio    : {_score("intl_student_ratio")}
 
 ─── QS Lens Scores ─────────────────────
-Research & Discovery   : {_score('research_discovery')}
-Learning Experience    : {_score('learning_experience')}
-Employability          : {_score('employability')}
-Global Engagement      : {_score('global_engagement')}
-Sustainability         : {_score('sustainability')}
+Research & Discovery   : {_score("research_discovery")}
+Learning Experience    : {_score("learning_experience")}
+Employability          : {_score("employability")}
+Global Engagement      : {_score("global_engagement")}
+Sustainability         : {_score("sustainability")}
 
 ─── About ──────────────────────────────
-{_v('description', 'No description available.')}
+{_v("description", "No description available.")}
 
 ─── Student Reviews ────────────────────
-{_v('review_snippets', 'No reviews available.')}
+{_v("review_snippets", "No reviews available.")}
 """
 
     prompt = f"""You are an expert university advisor. The user asked: "{original_query}"
@@ -287,23 +386,26 @@ Use a friendly, informative tone. Format with markdown headers and bullet points
 
     answer = _llm_complete(client, model, prompt, temperature=0.5, max_tokens=900)
 
-    card = [{
-        "rank": row.get("rank"),
-        "name": row.get("university_name"),
-        "country": row.get("country"),
-        "score": row.get("overall_score"),
-        "relevance": 1.0,
-        "description": str(row.get("description") or "")[:200],
-        "type": _v("university_type"),
-        "founded": _v("founded_year"),
-        "students": _v("total_students"),
-    }]
+    card = [
+        {
+            "rank": row.get("rank"),
+            "name": row.get("university_name"),
+            "country": row.get("country"),
+            "score": row.get("overall_score"),
+            "relevance": 1.0,
+            "description": str(row.get("description") or "")[:200],
+            "type": _v("university_type"),
+            "founded": _v("founded_year"),
+            "students": _v("total_students"),
+        }
+    ]
     return answer, card
 
 
 # ---------------------------------------------------------------------------
 # RAG path
 # ---------------------------------------------------------------------------
+
 
 def _run_rag_query(
     query: str,
@@ -318,7 +420,9 @@ def _run_rag_query(
     chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
 
     try:
-        collection = chroma_client.get_collection(COLLECTION_NAME, embedding_function=ef)
+        collection = chroma_client.get_collection(
+            COLLECTION_NAME, embedding_function=ef
+        )
     except Exception:
         return (
             "The vector store is not set up yet. Please click 'Rebuild Embeddings' in the sidebar first.",
@@ -348,9 +452,7 @@ def _run_rag_query(
     if not docs:
         return "No relevant universities found for your query.", []
 
-    context = "\n\n".join(
-        [f"[Source {i + 1}]\n{doc}" for i, doc in enumerate(docs)]
-    )
+    context = "\n\n".join([f"[Source {i + 1}]\n{doc}" for i, doc in enumerate(docs)])
 
     rag_prompt = f"""You are an expert university advisor with deep knowledge of QS World University Rankings. Answer the user's question using ONLY the context provided below.
 
@@ -389,6 +491,7 @@ Answer:"""
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def chat(
     user_query: str,
     filter_country: str | None = None,
@@ -410,7 +513,7 @@ def chat(
     (answer, reference_cards, query_type)
       answer          : str — the chatbot's response
       reference_cards : list[dict] — data cards shown in the UI (RAG path only)
-      query_type      : "rag" | "sql"
+      query_type      : "rag" | "sql" | "profile" | "greeting"
     """
     if not DB_PATH.exists():
         return (
@@ -418,6 +521,11 @@ def chat(
             [],
             "error",
         )
+
+    # 0. Handle greetings and help requests directly
+    greeting_type = _is_greeting(user_query)
+    if greeting_type:
+        return GREETING_RESPONSES.get(greeting_type, GREETING_RESPONSES["greeting"]), [], "greeting"
 
     client, model = _get_llm_client()
 
@@ -437,7 +545,9 @@ def chat(
 
     # 3. Semantic / comparison query → RAG
     answer, cards = _run_rag_query(
-        user_query, client, model,
+        user_query,
+        client,
+        model,
         n_results=n_results,
         filter_country=filter_country,
         filter_continent=filter_continent,
