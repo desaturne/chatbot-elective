@@ -13,12 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-try:
-    import pycountry_convert as pc
-    _HAS_PYCOUNTRY = True
-except ImportError:
-    _HAS_PYCOUNTRY = False
-    print("[!] pycountry-convert not installed; continent will be 'Unknown'")
+# No external dependency needed — full built-in country → continent mapping
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -31,12 +26,13 @@ DETAIL_CSV = Path("data/raw/rankings_detail.csv")
 PROCESSED_DIR = Path("data/processed")
 CLEAN_MAIN_CSV = PROCESSED_DIR / "rankings_main_cleaned.csv"
 CLEAN_DETAIL_CSV = PROCESSED_DIR / "rankings_detail_cleaned.csv"
-MERGED_CSV = PROCESSED_DIR / "rankings_merged.csv"   # joined, fully cleaned
+MERGED_CSV = PROCESSED_DIR / "rankings_merged.csv"  # joined, fully cleaned
 DB_PATH = PROCESSED_DIR / "qs_rankings.db"
 
 # ---------------------------------------------------------------------------
 # Cleaning helpers
 # ---------------------------------------------------------------------------
+
 
 def clean_score(val) -> float | None:
     """Strip non-numeric characters and return float, or None if unparseable."""
@@ -68,38 +64,99 @@ def clean_rank(val) -> int | None:
     return int(match.group(1)) if match else None
 
 
-# Continent code → readable name
-_CONTINENT_MAP = {
-    "AF": "Africa",
-    "AN": "Antarctica",
-    "AS": "Asia",
-    "EU": "Europe",
-    "NA": "North America",
-    "OC": "Oceania",
-    "SA": "South America",
-}
-
-# Manual overrides for countries that pycountry_convert misses
-_COUNTRY_OVERRIDES = {
-    "United States": "North America",
-    "USA": "North America",
-    "UK": "Europe",
-    "United Kingdom": "Europe",
-    "South Korea": "Asia",
-    "North Korea": "Asia",
-    "Hong Kong SAR": "Asia",
-    "Hong Kong": "Asia",
-    "Macau SAR": "Asia",
-    "Taiwan": "Asia",
-    "Russia": "Europe",
-    "Iran": "Asia",
-    "Syria": "Asia",
-    "Palestine": "Asia",
-    "Kosovo": "Europe",
-    "Czechia": "Europe",
-    "Czech Republic": "Europe",
-    "New Zealand": "Oceania",
-    "Australia": "Oceania",
+# Comprehensive country → continent lookup (no external library needed)
+_COUNTRY_TO_CONTINENT: dict[str, str] = {
+    # Africa
+    "Algeria": "Africa", "Angola": "Africa", "Benin": "Africa", "Botswana": "Africa",
+    "Burkina Faso": "Africa", "Burundi": "Africa", "Cabo Verde": "Africa",
+    "Cameroon": "Africa", "Central African Republic": "Africa", "Chad": "Africa",
+    "Comoros": "Africa", "Congo": "Africa", "Democratic Republic of the Congo": "Africa",
+    "Djibouti": "Africa", "Egypt": "Africa", "Equatorial Guinea": "Africa",
+    "Eritrea": "Africa", "Eswatini": "Africa", "Ethiopia": "Africa",
+    "Gabon": "Africa", "Gambia": "Africa", "Ghana": "Africa", "Guinea": "Africa",
+    "Guinea-Bissau": "Africa", "Ivory Coast": "Africa", "Côte d'Ivoire": "Africa",
+    "Kenya": "Africa", "Lesotho": "Africa", "Liberia": "Africa", "Libya": "Africa",
+    "Madagascar": "Africa", "Malawi": "Africa", "Mali": "Africa",
+    "Mauritania": "Africa", "Mauritius": "Africa", "Morocco": "Africa",
+    "Mozambique": "Africa", "Namibia": "Africa", "Niger": "Africa",
+    "Nigeria": "Africa", "Rwanda": "Africa", "São Tomé and Príncipe": "Africa",
+    "Senegal": "Africa", "Seychelles": "Africa", "Sierra Leone": "Africa",
+    "Somalia": "Africa", "South Africa": "Africa", "South Sudan": "Africa",
+    "Sudan": "Africa", "Tanzania": "Africa", "Togo": "Africa", "Tunisia": "Africa",
+    "Uganda": "Africa", "Zambia": "Africa", "Zimbabwe": "Africa",
+    # Asia
+    "Afghanistan": "Asia", "Armenia": "Asia", "Azerbaijan": "Asia",
+    "Bahrain": "Asia", "Bangladesh": "Asia", "Bhutan": "Asia",
+    "Brunei": "Asia", "Cambodia": "Asia", "China": "Asia",
+    "Cyprus": "Asia", "Georgia": "Asia", "Hong Kong": "Asia",
+    "Hong Kong SAR": "Asia", "Macau SAR": "Asia", "Macau": "Asia",
+    "India": "Asia", "Indonesia": "Asia", "Iran": "Asia", "Iraq": "Asia",
+    "Israel": "Asia", "Japan": "Asia", "Jordan": "Asia",
+    "Kazakhstan": "Asia", "Kuwait": "Asia", "Kyrgyzstan": "Asia",
+    "Laos": "Asia", "Lebanon": "Asia", "Malaysia": "Asia",
+    "Maldives": "Asia", "Mongolia": "Asia", "Myanmar": "Asia",
+    "Nepal": "Asia", "North Korea": "Asia", "Oman": "Asia",
+    "Pakistan": "Asia", "Palestine": "Asia", "Philippines": "Asia",
+    "Qatar": "Asia", "Saudi Arabia": "Asia", "Singapore": "Asia",
+    "South Korea": "Asia", "Sri Lanka": "Asia", "Syria": "Asia",
+    "Taiwan": "Asia", "Tajikistan": "Asia", "Thailand": "Asia",
+    "Timor-Leste": "Asia", "Turkey": "Asia", "Turkmenistan": "Asia",
+    "United Arab Emirates": "Asia", "Uzbekistan": "Asia",
+    "Vietnam": "Asia", "Yemen": "Asia",
+    # Europe
+    "Albania": "Europe", "Andorra": "Europe", "Austria": "Europe",
+    "Belarus": "Europe", "Belgium": "Europe", "Bosnia and Herzegovina": "Europe",
+    "Bulgaria": "Europe", "Croatia": "Europe", "Czech Republic": "Europe",
+    "Czechia": "Europe", "Denmark": "Europe", "Estonia": "Europe",
+    "Finland": "Europe", "France": "Europe", "Germany": "Europe",
+    "Greece": "Europe", "Hungary": "Europe", "Iceland": "Europe",
+    "Ireland": "Europe", "Italy": "Europe", "Kosovo": "Europe",
+    "Latvia": "Europe", "Liechtenstein": "Europe", "Lithuania": "Europe",
+    "Luxembourg": "Europe", "Malta": "Europe", "Moldova": "Europe",
+    "Monaco": "Europe", "Montenegro": "Europe", "Netherlands": "Europe",
+    "North Macedonia": "Europe", "Norway": "Europe", "Poland": "Europe",
+    "Portugal": "Europe", "Romania": "Europe", "Russia": "Europe",
+    "San Marino": "Europe", "Serbia": "Europe", "Slovakia": "Europe",
+    "Slovenia": "Europe", "Spain": "Europe", "Sweden": "Europe",
+    "Switzerland": "Europe", "Ukraine": "Europe",
+    "United Kingdom": "Europe", "UK": "Europe",
+    "Vatican City": "Europe",
+    # North America
+    "Antigua and Barbuda": "North America", "Bahamas": "North America",
+    "Barbados": "North America", "Belize": "North America",
+    "Canada": "North America", "Costa Rica": "North America",
+    "Cuba": "North America", "Dominica": "North America",
+    "Dominican Republic": "North America", "El Salvador": "North America",
+    "Grenada": "North America", "Guatemala": "North America",
+    "Haiti": "North America", "Honduras": "North America",
+    "Jamaica": "North America", "Mexico": "North America",
+    "Nicaragua": "North America", "Panama": "North America",
+    "Saint Kitts and Nevis": "North America",
+    "Saint Lucia": "North America",
+    "Saint Vincent and the Grenadines": "North America",
+    "Trinidad and Tobago": "North America",
+    "United States": "North America", "USA": "North America",
+    # South America
+    "Argentina": "South America", "Bolivia": "South America",
+    "Brazil": "South America", "Chile": "South America",
+    "Colombia": "South America", "Ecuador": "South America",
+    "Guyana": "South America", "Paraguay": "South America",
+    "Peru": "South America", "Suriname": "South America",
+    "Uruguay": "South America", "Venezuela": "South America",
+    # Oceania
+    "Australia": "Oceania", "Fiji": "Oceania", "Kiribati": "Oceania",
+    "Marshall Islands": "Oceania", "Micronesia": "Oceania",
+    "Nauru": "Oceania", "New Zealand": "Oceania", "Palau": "Oceania",
+    "Papua New Guinea": "Oceania", "Samoa": "Oceania",
+    "Solomon Islands": "Oceania", "Tonga": "Oceania",
+    "Tuvalu": "Oceania", "Vanuatu": "Oceania",
+    # QS-specific country name variants
+    "China (Mainland)": "Asia",
+    "Türkiye": "Asia",
+    "Palestinian Territories": "Asia",
+    "Northern Cyprus": "Asia",
+    "Puerto Rico": "North America",
+    "Bosnia & Herzegovina": "Europe",
 }
 
 
@@ -107,16 +164,7 @@ def country_to_continent(country_name: str) -> str:
     if not country_name or pd.isna(country_name):
         return "Unknown"
     name = str(country_name).strip()
-    if name in _COUNTRY_OVERRIDES:
-        return _COUNTRY_OVERRIDES[name]
-    if not _HAS_PYCOUNTRY:
-        return "Unknown"
-    try:
-        alpha2 = pc.country_name_to_country_alpha2(name, cn_name_format="default")
-        cont_code = pc.country_alpha2_to_continent_code(alpha2)
-        return _CONTINENT_MAP.get(cont_code, "Unknown")
-    except Exception:
-        return "Unknown"
+    return _COUNTRY_TO_CONTINENT.get(name, "Unknown")
 
 
 # ---------------------------------------------------------------------------
@@ -196,14 +244,19 @@ CREATE VIEW v_full_rankings AS
 # Pipeline
 # ---------------------------------------------------------------------------
 
+
 def _clean_main(df: pd.DataFrame) -> pd.DataFrame:
     """
     Clean the raw rankings list (Layer A).
     All downstream steps use the output of this function — never the raw CSV.
     """
     score_cols = [
-        "overall_score", "citations_per_faculty", "academic_reputation",
-        "employer_reputation", "intl_faculty_ratio", "intl_student_ratio",
+        "overall_score",
+        "citations_per_faculty",
+        "academic_reputation",
+        "employer_reputation",
+        "intl_faculty_ratio",
+        "intl_student_ratio",
     ]
     for col in score_cols:
         if col in df.columns:
@@ -230,8 +283,11 @@ def _clean_detail(df: pd.DataFrame) -> pd.DataFrame:
     All downstream steps use the output of this function — never the raw CSV.
     """
     detail_score_cols = [
-        "research_discovery", "learning_experience", "employability",
-        "global_engagement", "sustainability",
+        "research_discovery",
+        "learning_experience",
+        "employability",
+        "global_engagement",
+        "sustainability",
     ]
     for col in detail_score_cols:
         if col in df.columns:
@@ -245,12 +301,22 @@ def _clean_detail(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].apply(lambda v: v if v is None or 0 <= v <= 100 else None)
 
     # Text fields: strip whitespace, map empty → None
-    text_cols = ["description", "university_type", "founded_year",
-                 "total_students", "student_faculty_ratio", "review_snippets"]
+    text_cols = [
+        "description",
+        "university_type",
+        "founded_year",
+        "total_students",
+        "student_faculty_ratio",
+        "review_snippets",
+    ]
     for col in text_cols:
         if col in df.columns:
             df[col] = df[col].apply(
-                lambda v: str(v).strip() if pd.notna(v) and str(v).strip() not in ("", "nan") else None
+                lambda v: (
+                    str(v).strip()
+                    if pd.notna(v) and str(v).strip() not in ("", "nan")
+                    else None
+                )
             )
         else:
             df[col] = None
@@ -275,12 +341,16 @@ def run_pipeline():
     df_main_raw = pd.read_csv(MAIN_CSV)
     print(f"      {len(df_main_raw)} rows before cleaning")
     df_main = _clean_main(df_main_raw.copy())
-    print(f"      {len(df_main)} rows after cleaning  "
-          f"({len(df_main_raw) - len(df_main)} dropped)")
+    print(
+        f"      {len(df_main)} rows after cleaning  "
+        f"({len(df_main_raw) - len(df_main)} dropped)"
+    )
 
     df_detail = None
     if DETAIL_CSV.exists():
-        print(f"  [*] Loading raw {DETAIL_CSV} ({DETAIL_CSV.stat().st_size // 1024} KB)...")
+        print(
+            f"  [*] Loading raw {DETAIL_CSV} ({DETAIL_CSV.stat().st_size // 1024} KB)..."
+        )
         df_detail_raw = pd.read_csv(DETAIL_CSV)
         print(f"      {len(df_detail_raw)} rows before cleaning")
         df_detail = _clean_detail(df_detail_raw.copy())
@@ -303,9 +373,14 @@ def run_pipeline():
         # Build merged / joined CSV — this is the single source of truth
         # Drop columns from detail that already exist in main to avoid _x/_y suffixes
         _detail_only_cols = [
-            "university_name", "cleaned_at",
-            "overall_score", "academic_reputation", "employer_reputation",
-            "citations_per_faculty", "intl_faculty_ratio", "intl_student_ratio",
+            "university_name",
+            "cleaned_at",
+            "overall_score",
+            "academic_reputation",
+            "employer_reputation",
+            "citations_per_faculty",
+            "intl_faculty_ratio",
+            "intl_student_ratio",
         ]
         df_merged = pd.merge(
             df_main,
@@ -332,9 +407,18 @@ def run_pipeline():
 
     # Insert cleaned main table
     main_db_cols = [
-        "rank", "university_name", "country", "continent", "overall_score",
-        "citations_per_faculty", "academic_reputation", "employer_reputation",
-        "intl_faculty_ratio", "intl_student_ratio", "detail_url", "cleaned_at",
+        "rank",
+        "university_name",
+        "country",
+        "continent",
+        "overall_score",
+        "citations_per_faculty",
+        "academic_reputation",
+        "employer_reputation",
+        "intl_faculty_ratio",
+        "intl_student_ratio",
+        "detail_url",
+        "cleaned_at",
     ]
     df_main_db = df_main.rename(columns={"cleaned_at": "scraped_at"})
     for col in main_db_cols:
@@ -354,17 +438,27 @@ def run_pipeline():
         df_detail["university_id"] = df_detail["university_id"].astype(int)
 
         detail_db_cols = [
-            "university_id", "research_discovery", "learning_experience",
-            "employability", "global_engagement", "sustainability",
-            "description", "university_type", "founded_year",
-            "total_students", "student_faculty_ratio", "review_snippets",
+            "university_id",
+            "research_discovery",
+            "learning_experience",
+            "employability",
+            "global_engagement",
+            "sustainability",
+            "description",
+            "university_type",
+            "founded_year",
+            "total_students",
+            "student_faculty_ratio",
+            "review_snippets",
             "cleaned_at",
         ]
         df_detail_db = df_detail.copy()
         for col in detail_db_cols:
             if col not in df_detail_db.columns:
                 df_detail_db[col] = None
-        df_detail_db[detail_db_cols].rename(columns={"cleaned_at": "scraped_at"}).to_sql(
+        df_detail_db[detail_db_cols].rename(
+            columns={"cleaned_at": "scraped_at"}
+        ).to_sql(
             "university_details", conn, if_exists="append", index=False, method="multi"
         )
         print(f"  [+] university_details table: {len(df_detail)} rows")

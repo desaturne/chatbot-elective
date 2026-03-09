@@ -47,7 +47,7 @@ def _get_llm_client():
             api_key=os.getenv("GROQ_API_KEY"),
             base_url="https://api.groq.com/openai/v1",
         )
-        model = os.getenv("GROQ_MODEL", "llama3-8b-8192")
+        model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     return client, model
 
 
@@ -70,7 +70,14 @@ MATH_KEYWORDS = [
     "compare", "rank between", "greater than", "less than", "sum", "total",
     "minimum", "maximum", "which country has the most",
     "how does", "median", "percentile",
+    "rank ", "ranked ", "ranking ", "which is the", "who is ranked",
 ]
+
+# Matches: "8th ranked", "ranked 8th", "rank 8", "ranked #8", "#8 ranked", "8th"
+RANK_NUMBER_RE = re.compile(
+    r"\b(?:rank(?:ed)?\s*#?\s*\d+|\d+\s*(?:st|nd|rd|th)\s*rank(?:ed)?|#\s*\d+)\b",
+    re.IGNORECASE,
+)
 
 PROFILE_PATTERNS = [
     r"tell me about (.+)",
@@ -83,7 +90,7 @@ PROFILE_PATTERNS = [
 
 def _is_math_query(query: str) -> bool:
     q = query.lower()
-    return any(kw in q for kw in MATH_KEYWORDS)
+    return any(kw in q for kw in MATH_KEYWORDS) or bool(RANK_NUMBER_RE.search(q))
 
 
 def _extract_profile_university(query: str) -> str | None:
