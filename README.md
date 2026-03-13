@@ -6,7 +6,7 @@ An intelligent chatbot that helps users explore and query the QS World Universit
 
 ## Demo
 
-https://github.com/user-attachments/assets/demo-chatbot.mp4
+https://github.com/desaturne/chatbot-elective/assets/demo-chatbot.mp4
 
 ### Screenshots
 
