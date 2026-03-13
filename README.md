@@ -4,12 +4,25 @@ An intelligent chatbot that helps users explore and query the QS World Universit
 
 ---
 
+## Demo
+
+https://github.com/user-attachments/assets/demo-chatbot.mp4
+
+### Screenshots
+
+| Landing Page | Basic Greeting | Working Demo |
+|:---:|:---:|:---:|
+| ![Landing](img/chatbot-landing.png) | ![Greeting](img/chatbot-basic-greeting.png) | ![Working](img/chatbot-working.png) |
+
+---
+
 ## Table of Contents
 
+- [Demo](#demo)
 - [Overview](#overview)
 - [Features](#features)
 - [Project Structure](#project-structure)
-- [Data Flow Architecture](#data-flow-architecture)
+- [Flow of Execution](#flow-of-execution)
 - [Installation](#installation)
 - [Usage](#usage)
 - [Configuration](#configuration)
@@ -285,6 +298,102 @@ chatbot-elective/
 
 ---
 
+## Flow of Execution
+
+This section explains the exact sequence to run the project from scratch.
+
+### Execution Order
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    REQUIRED EXECUTION ORDER                       │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│   STEP 1: SETUP (one-time)                                       │
+│   ├── Create virtual environment                                  │
+│   ├── Install dependencies                                        │
+│   ├── Install Playwright browsers                                 │
+│   └── Configure .env with API keys                               │
+│                                                                   │
+│   STEP 2: SCRAPE DATA                                            │
+│   ├── Run scraper.py                                             │
+│   ├── Output: data/raw/rankings_main.csv                         │
+│   └── Output: data/raw/rankings_detail.csv                       │
+│                                                                   │
+│   STEP 3: PROCESS DATA                                           │
+│   ├── Run pipeline.py                                            │
+│   ├── Cleans raw CSVs                                            │
+│   └── Creates: data/processed/qs_rankings.db (SQLite)            │
+│                                                                   │
+│   STEP 4: BUILD EMBEDDINGS                                       │
+│   ├── Run embedder.py                                            │
+│   ├── Reads SQLite database                                      │
+│   └── Creates: data/chroma_db/ (Vector Store)                    │
+│                                                                   │
+│   STEP 5: RUN APPLICATION                                        │
+│   └── Run: streamlit run app.py                                  │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Two Ways to Run
+
+#### Option A: Easy Way (Recommended for Beginners)
+
+After completing **Step 1: Setup**, simply run:
+
+```bash
+streamlit run app.py
+```
+
+Then use the **Admin Tools** in the sidebar:
+1. Click **"Run Scraper"** — downloads data (15-30 min)
+2. The pipeline runs automatically after scraping
+3. Click **"Rebuild Embeddings"** — creates vector store (2-5 min)
+4. Start chatting!
+
+#### Option B: Manual Way (Full Control)
+
+Run each script sequentially from the command line:
+
+```bash
+# Step 2: Scrape data from QS website (15-30 minutes)
+python scraper.py
+
+# Step 3: Process and load into SQLite (1-2 minutes)
+python pipeline.py
+
+# Step 4: Build vector embeddings (2-5 minutes)
+python embedder.py
+
+# Step 5: Run the Streamlit app
+streamlit run app.py
+```
+
+### Prerequisites Checklist
+
+Before running anything, ensure you have:
+
+| Requirement | How to Check | How to Fix |
+|-------------|--------------|------------|
+| Python 3.10+ | `python --version` | Install from python.org |
+| Virtual env active | `(Scripts)` in terminal | Run `.venv\Scripts\activate` |
+| Dependencies installed | `pip list` shows packages | `pip install -r requirements.txt` |
+| Playwright browsers | `playwright --version` | `playwright install chromium` |
+| API key configured | `.env` file exists | Copy from `.env.example` |
+
+### Troubleshooting Common Issues
+
+| Problem | Likely Cause | Solution |
+|---------|--------------|----------|
+| "No module named 'streamlit'" | Dependencies not installed | `pip install -r requirements.txt` |
+| "Database not found" | Scraper/pipeline not run | Run Admin Tools → Run Scraper |
+| "ChromaDB not found" | Embeddings not built | Run Admin Tools → Rebuild Embeddings |
+| "API key invalid" | Missing/wrong API key | Check `.env` file |
+| Scraper fails | Network/Playwright issues | Run `playwright install chromium` |
+
+---
+
 ## Installation
 
 ### Prerequisites
@@ -340,33 +449,26 @@ chatbot-elective/
 
 ## Usage
 
-### Quick Start
+> **New users:** Follow the [Flow of Execution](#flow-of-execution) section above for step-by-step guidance.
 
-1. **Run the Streamlit app**
-   ```bash
-   .venv\Scripts\streamlit.exe run app.py
-   ```
-
-2. **First-time setup** (via sidebar Admin Tools):
-   - Click "Run Scraper" to download rankings data
-   - Click "Rebuild Embeddings" to create the vector store
-
-3. **Start chatting!**
-
-### Manual Pipeline Execution
+### Running the App
 
 ```bash
-# Step 1: Scrape data from QS website (15-30 minutes)
-.venv\Scripts\python.exe scraper.py
-
-# Step 2: Process and load into SQLite
-.venv\Scripts\python.exe pipeline.py
-
-# Step 3: Build vector embeddings
-.venv\Scripts\python.exe embedder.py
-
-# Step 4: Run the app
+# Windows
 .venv\Scripts\streamlit.exe run app.py
+
+# Linux/Mac
+streamlit run app.py
+```
+
+### Quick Reference: All Commands
+
+```bash
+# Run individual scripts (in order)
+python scraper.py      # Download data (15-30 min)
+python pipeline.py     # Process into SQLite (1-2 min)
+python embedder.py     # Build vector store (2-5 min)
+streamlit run app.py   # Launch web app
 ```
 
 ### Example Queries
